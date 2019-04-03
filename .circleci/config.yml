@@ -6,32 +6,136 @@ version: 2
 jobs:
   build:
     docker:
-      # specify the version you desire here
       - image: circleci/node:7.10
-
-      # Specify service dependencies here if necessary
-      # CircleCI maintains a library of pre-built images
-      # documented at https://circleci.com/docs/2.0/circleci-images/
-      # - image: circleci/mongo:3.4.4
-
+            
     working_directory: ~/repo
 
     steps:
       - checkout
 
+      - run: rm app/package.json
+      - run: cp app/web/package.json app/package.json
+      
       # Download and cache dependencies
       - restore_cache:
           keys:
-            - v1-dependencies-{{ checksum "package.json" }}
-            # fallback to using the latest cache if no exact match is found
-            - v1-dependencies-
+          - v1-dependencies-{{ checksum "app/package.json" }}-{{ checksum "app/web/package.json" }}
+          # fallback to using the latest cache if no exact match is found
+#          - v1-dependencies-
 
-      - run: yarn install
+      - run: npm --prefix app install; npm --prefix app/web install
 
       - save_cache:
           paths:
-            - node_modules
-          key: v1-dependencies-{{ checksum "package.json" }}
+            - app/node_modules
+            - app/web/node_modules
+          key: v1-dependencies-{{ checksum "app/package.json" }}-{{ checksum "app/web/package.json" }}
+      
+      - run: rm -f app/web/node_modules/vokzal-platform app/node_modules/vokzal-platform
+      
+      - run: CWD=`pwd`; if [ ! -f $CWD/app/node_modules/vokzal-platform ]; then ln -s $CWD/app/web $CWD/app/node_modules/vokzal-platform; fi
+      - run: CWD=`pwd`; if [ ! -f $CWD/app/web/node_modules/vokzal-platform ]; then ln -s $CWD/app/web $CWD/app/web/node_modules/vokzal-platform; fi           
+      CWD=`pwd`; ln -s $CWD/app/web $CWD/app/node_modules/vokzal-platform
+      - run: rm app/.babelrc
+      - run: CWD=`pwd`; ln -s $CWD/app/.babelrc.web $CWD/app/.babelrc
 
-      # run tests!
-      - run: yarn test
+      - run: npm --prefix app/web run build-prod
+      - run: npm --prefix app/web run build-stage
+      - run: npm --prefix app/web run build-dev
+
+      - persist_to_workspace:
+          # Must be an absolute path, or relative path from working_directory
+          root: app/web/dist
+          # Must be relative path from root
+          paths:
+            - production
+            - stage
+            - development
+
+  package:
+    machine:
+        enabled: true
+            
+    working_directory: ~/
+
+    steps:
+      - attach_workspace:
+          at: /tmp/dist
+
+      - run: mkdir packaged
+
+      - run: tar --directory /tmp/dist/production --transform "s,^,${CIRCLE_TAG}/," -czf packaged/production.tar.gz .
+      - run: tar --directory /tmp/dist/stage --transform "s,^,${CIRCLE_TAG}/," -czf packaged/stage.tar.gz .
+      - run: tar --directory /tmp/dist/development --transform "s,^,${CIRCLE_TAG}/," -czf packaged/development.tar.gz .
+
+      - store_artifacts:
+          path: packaged
+
+      - persist_to_workspace:
+          # Must be an absolute path, or relative path from working_directory
+          root: ~/
+          # Must be relative path from root
+          paths:
+            - packaged
+    
+  artifact_to_github:
+    machine:
+        enabled: true
+
+    working_directory: ~/
+
+    steps:
+      - attach_workspace:
+          at: /tmp
+
+      - run: ls -l /tmp/packaged
+      - run: echo ${CIRCLE_TAG}
+      - run: curl -u dbaklikov:fcc4c88b43d57bc0e654f7167602239d0d3204aa -v https://api.github.com/repos/oleshiy/react.vokzal.ru/releases/tags/${CIRCLE_TAG} > z
+      - run: |
+          zz=`grep upload_url z`
+          upload_url=${zz:17:-15}
+          echo -n $upload_url > upload_url
+      - run: |
+          upload_url=`cat upload_url`
+          name="Binary%20Archive%20(production)"
+          curl -u dbaklikov:fcc4c88b43d57bc0e654f7167602239d0d3204aa -X POST -H "Content-Type: application/gzip" --data-binary @"/tmp/packaged/production.tar.gz" "$upload_url?name=production-${CIRCLE_TAG}.tar.gz&label=$name"
+      - run: |
+          upload_url=`cat upload_url`
+          name="Binary%20Archive%20(stage)"
+          curl -u dbaklikov:fcc4c88b43d57bc0e654f7167602239d0d3204aa -X POST -H "Content-Type: application/gzip" --data-binary @"/tmp/packaged/stage.tar.gz" "$upload_url?name=stage-${CIRCLE_TAG}.tar.gz&label=$name"
+
+      - run: |
+          upload_url=`cat upload_url`
+          name="Binary%20Archive%20(development)"
+          curl -u dbaklikov:fcc4c88b43d57bc0e654f7167602239d0d3204aa -X POST -H "Content-Type: application/gzip" --data-binary @"/tmp/packaged/development.tar.gz" "$upload_url?name=development-${CIRCLE_TAG}.tar.gz&label=$name"
+
+
+workflows:
+  version: 2
+  build_on_release:
+    jobs:
+      - build:
+          filters:
+            branches:
+              ignore:
+                  - /.*/
+            tags:
+              ignore: /^testing-.*/
+      - package:
+          requires:
+            - build
+          filters:
+            branches:
+              ignore:
+                  - /.*/
+            tags:
+              ignore: /^testing-.*/
+      - artifact_to_github:
+          requires:
+            - package
+          filters:
+            branches:
+              ignore:
+                  - /.*/
+            tags:
+              ignore: /^testing-.*/
